@@ -6,7 +6,7 @@
   <parent>
     <groupId>com.squareup.okhttp</groupId>
     <artifactId>parent</artifactId>
-    <version>1.2.1</version>
+    <version>1.2.2-SNAPSHOT</version>
   </parent>
 
   <groupId>com.squareup.okhttp.sample</groupId>
@@ -17,5 +17,6 @@
   <modules>
     <module>guide</module>
     <module>simple-client</module>
+    <module>static-server</module>
   </modules>
 </project>

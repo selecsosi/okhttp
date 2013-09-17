@@ -75,6 +75,7 @@ public class HttpURLConnectionImpl extends HttpURLConnection implements Policy {
   private int redirectionCount;
   protected IOException httpEngineFailure;
   protected HttpEngine httpEngine;
+  private Proxy selectedProxy;
 
   public HttpURLConnectionImpl(URL url, OkHttpClient client) {
     super(url);
@@ -331,6 +332,11 @@ public class HttpURLConnectionImpl extends HttpURLConnection implements Policy {
 
       httpEngine = newHttpEngine(retryMethod, rawRequestHeaders, httpEngine.getConnection(),
           (RetryableOutputStream) requestBody);
+
+      if (requestBody == null) {
+        // Drop the Content-Length header when redirected from POST to GET.
+        httpEngine.getRequestHeaders().removeContentLength();
+      }
     }
   }
 
@@ -345,6 +351,7 @@ public class HttpURLConnectionImpl extends HttpURLConnection implements Policy {
       if (readResponse) {
         httpEngine.readResponse();
       }
+
       return true;
     } catch (IOException e) {
       if (handleFailure(e)) {
@@ -477,7 +484,19 @@ public class HttpURLConnectionImpl extends HttpURLConnection implements Policy {
   }
 
   @Override public final boolean usingProxy() {
-    Proxy proxy = client.getProxy();
+    if (selectedProxy != null) {
+      return isValidNonDirectProxy(selectedProxy);
+    }
+
+    // This behavior is a bit odd (but is probably justified by the
+    // oddness of the APIs involved). Before a connection is established,
+    // this method will return true only if this connection was explicitly
+    // opened with a Proxy. We don't attempt to query the ProxySelector
+    // at all.
+    return isValidNonDirectProxy(client.getProxy());
+  }
+
+  private static boolean isValidNonDirectProxy(Proxy proxy) {
     return proxy != null && proxy.type() != Proxy.Type.DIRECT;
   }
 
@@ -565,8 +584,11 @@ public class HttpURLConnectionImpl extends HttpURLConnection implements Policy {
     super.fixedContentLength = (int) Math.min(contentLength, Integer.MAX_VALUE);
   }
   
-  	@Override
-	public void setRequestMethod(String method) throws ProtocolException {
+  @Override public void setRequestMethod(String method) throws ProtocolException {
 		this.method = method;
 	}
+
+  @Override public final void setSelectedProxy(Proxy proxy) {
+    this.selectedProxy = proxy;
+  }
 }

@@ -1207,10 +1207,7 @@ public final class URLConnectionTest {
 
   @Test public void nonStandardAuthenticationSchemeWithRealm() throws Exception {
     List<String> calls = authCallsForHeader("WWW-Authenticate: Foo realm=\"Bar\"");
-    assertEquals(1, calls.size());
-    String call = calls.get(0);
-    assertTrue(call, call.contains("scheme=Foo"));
-    assertTrue(call, call.contains("prompt=Bar"));
+    assertEquals(0, calls.size());
   }
 
   // Digest auth is currently unsupported. Test that digest requests should fail reasonably.
@@ -1220,10 +1217,7 @@ public final class URLConnectionTest {
         + "realm=\"testrealm@host.com\", qop=\"auth,auth-int\", "
         + "nonce=\"dcd98b7102dd2f0e8b11d0f600bfb0c093\", "
         + "opaque=\"5ccc069c403ebaf9f0171e9517f40e41\"");
-    assertEquals(1, calls.size());
-    String call = calls.get(0);
-    assertTrue(call, call.contains("scheme=Digest"));
-    assertTrue(call, call.contains("prompt=testrealm@host.com"));
+    assertEquals(0, calls.size());
   }
 
   @Test public void allAttributesSetInServerAuthenticationCallbacks() throws Exception {
@@ -1720,6 +1714,32 @@ public final class URLConnectionTest {
 
     RecordedRequest page2 = server.takeRequest();
     assertEquals("GET /page2 HTTP/1.1", page2.getRequestLine());
+  }
+
+  @Test public void redirectedPostStripsRequestBodyHeaders() throws Exception {
+    server.enqueue(new MockResponse()
+        .setResponseCode(HttpURLConnection.HTTP_MOVED_TEMP)
+        .addHeader("Location: /page2"));
+    server.enqueue(new MockResponse().setBody("Page 2"));
+    server.play();
+
+    HttpURLConnection connection = client.open(server.getUrl("/page1"));
+    connection.setDoOutput(true);
+    connection.addRequestProperty("Content-Length", "4");
+    connection.addRequestProperty("Content-Type", "text/plain; charset=utf-8");
+    connection.addRequestProperty("Transfer-Encoding", "identity");
+    OutputStream outputStream = connection.getOutputStream();
+    outputStream.write("ABCD".getBytes("UTF-8"));
+    outputStream.close();
+    assertEquals("Page 2", readAscii(connection.getInputStream(), Integer.MAX_VALUE));
+
+    assertEquals("POST /page1 HTTP/1.1", server.takeRequest().getRequestLine());
+
+    RecordedRequest page2 = server.takeRequest();
+    assertEquals("GET /page2 HTTP/1.1", page2.getRequestLine());
+    assertContainsNoneMatching(page2.getHeaders(), "Content-Length");
+    assertContains(page2.getHeaders(), "Content-Type: text/plain; charset=utf-8");
+    assertContains(page2.getHeaders(), "Transfer-Encoding: identity");
   }
 
   @Test public void response305UseProxy() throws Exception {

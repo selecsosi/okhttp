@@ -213,6 +213,18 @@ public final class RequestHeaders {
     this.contentLength = contentLength;
   }
 
+  /**
+   * Remove the Content-Length headers. Call this when dropping the body on a
+   * request or response, such as when a redirect changes the method from POST
+   * to GET.
+   */
+  public void removeContentLength() {
+    if (contentLength != -1) {
+      headers.removeAll("Content-Length");
+      contentLength = -1;
+    }
+  }
+
   public void setUserAgent(String userAgent) {
     if (this.userAgent != null) {
       headers.removeAll("User-Agent");
@@ -282,9 +294,24 @@ public final class RequestHeaders {
   public void addCookies(Map<String, List<String>> allCookieHeaders) {
     for (Map.Entry<String, List<String>> entry : allCookieHeaders.entrySet()) {
       String key = entry.getKey();
-      if ("Cookie".equalsIgnoreCase(key) || "Cookie2".equalsIgnoreCase(key)) {
-        headers.addAll(key, entry.getValue());
+      if (("Cookie".equalsIgnoreCase(key) || "Cookie2".equalsIgnoreCase(key))
+          && !entry.getValue().isEmpty()) {
+        headers.add(key, buildCookieHeader(entry.getValue()));
       }
     }
+  }
+
+  /**
+   * Send all cookies in one big header, as recommended by
+   * <a href="http://tools.ietf.org/html/rfc6265#section-4.2.1">RFC 6265</a>.
+   */
+  private String buildCookieHeader(List<String> cookies) {
+    if (cookies.size() == 1) return cookies.get(0);
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < cookies.size(); i++) {
+      if (i > 0) sb.append("; ");
+      sb.append(cookies.get(i));
+    }
+    return sb.toString();
   }
 }

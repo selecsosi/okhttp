@@ -16,14 +16,26 @@
 package com.squareup.okhttp.internal.spdy;
 
 import com.squareup.okhttp.internal.Util;
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.UnsupportedEncodingException;
+import java.util.Arrays;
 import java.util.List;
 
 final class Http20Draft04 implements Variant {
+  private static final byte[] CONNECTION_HEADER;
+  static {
+    try {
+      CONNECTION_HEADER = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".getBytes("UTF-8");
+    } catch (UnsupportedEncodingException e) {
+      throw new AssertionError();
+    }
+  }
+
   static final int TYPE_DATA = 0x0;
   static final int TYPE_HEADERS = 0x1;
   static final int TYPE_PRIORITY = 0x2;
@@ -41,18 +53,32 @@ final class Http20Draft04 implements Variant {
   static final int FLAG_END_FLOW_CONTROL = 0x1;
 
   @Override public FrameReader newReader(InputStream in, boolean client) {
-    return new Reader(in);
+    return new Reader(in, client);
   }
 
   @Override public FrameWriter newWriter(OutputStream out, boolean client) {
-    return new Writer(out);
+    return new Writer(out, client);
   }
 
   static final class Reader implements FrameReader {
     private final DataInputStream in;
+    private final boolean client;
+    private final Hpack.Reader hpackReader;
 
-    Reader(InputStream in) {
+    Reader(InputStream in, boolean client) {
       this.in = new DataInputStream(in);
+      this.client = client;
+      this.hpackReader = new Hpack.Reader(this.in, client);
+    }
+
+    @Override public void readConnectionHeader() throws IOException {
+      if (client) return; // Nothing to read; servers don't send connection headers!
+      byte[] connectionHeader = new byte[CONNECTION_HEADER.length];
+      in.readFully(connectionHeader);
+      if (!Arrays.equals(connectionHeader, CONNECTION_HEADER)) {
+        throw ioException("Expected a connection header but was "
+            + Arrays.toString(connectionHeader));
+      }
     }
 
     @Override public boolean nextFrame(Handler handler) throws IOException {
@@ -64,15 +90,19 @@ final class Http20Draft04 implements Variant {
       }
       int w2 = in.readInt();
 
-      int length = w1 & 0xffff;
-      int type = (w1 & 0xff0000) >> 16;
-      int flags = (w1 & 0xff000000) >> 24;
+      int length = (w1 & 0xffff0000) >> 16;
+      int type = (w1 & 0xff00) >> 8;
+      int flags = w1 & 0xff;
       // boolean r = (w2 & 0x80000000) != 0; // Reserved.
       int streamId = (w2 & 0x7fffffff);
 
       switch (type) {
         case TYPE_DATA:
           readData(handler, flags, length, streamId);
+          return true;
+
+        case TYPE_HEADERS:
+          readHeaders(handler, flags, length, streamId);
           return true;
 
         case TYPE_PRIORITY:
@@ -105,6 +135,38 @@ final class Http20Draft04 implements Variant {
       }
 
       throw new UnsupportedOperationException("TODO");
+    }
+
+    private void readHeaders(Handler handler, int flags, int length, int streamId)
+        throws IOException {
+      if (streamId == 0) throw ioException("TYPE_HEADERS streamId == 0");
+
+      while (true) {
+        hpackReader.readHeaders(length);
+
+        if ((flags & FLAG_END_HEADERS) != 0) {
+          hpackReader.emitReferenceSet();
+          List<String> namesAndValues = hpackReader.getAndReset();
+          boolean inFinished = (flags & FLAG_END_STREAM) != 0;
+          int priority = -1; // TODO: priority
+          handler.headers(false, inFinished, streamId, -1, priority, namesAndValues,
+              HeadersMode.HTTP_20_HEADERS);
+          return;
+        }
+
+        // Read another frame of headers.
+        int w1 = in.readInt();
+        int w2 = in.readInt();
+
+        length = (w1 & 0xffff0000) >> 16;
+        int newType = (w1 & 0xff00) >> 8;
+        flags = w1 & 0xff;
+        // boolean r = (w2 & 0x80000000) != 0; // Reserved.
+        int newStreamId = (w2 & 0x7fffffff);
+
+        if (newType != TYPE_HEADERS) throw ioException("TYPE_HEADERS didn't have FLAG_END_HEADERS");
+        if (newStreamId != streamId) throw ioException("TYPE_HEADERS streamId changed");
+      }
     }
 
     private void readData(Handler handler, int flags, int length, int streamId) throws IOException {
@@ -198,33 +260,56 @@ final class Http20Draft04 implements Variant {
 
   static final class Writer implements FrameWriter {
     private final DataOutputStream out;
+    private final boolean client;
+    private final ByteArrayOutputStream hpackBuffer;
+    private final Hpack.Writer hpackWriter;
 
-    Writer(OutputStream out) {
+    Writer(OutputStream out, boolean client) {
       this.out = new DataOutputStream(out);
+      this.client = client;
+      this.hpackBuffer = new ByteArrayOutputStream();
+      this.hpackWriter = new Hpack.Writer(hpackBuffer);
     }
 
     @Override public synchronized void flush() throws IOException {
       out.flush();
     }
 
-    @Override public synchronized void connectionHeader() {
-      throw new UnsupportedOperationException("TODO");
+    @Override public synchronized void connectionHeader() throws IOException {
+      if (!client) return; // Nothing to write; servers don't send connection headers!
+      out.write(CONNECTION_HEADER);
     }
 
     @Override public synchronized void synStream(boolean outFinished, boolean inFinished,
         int streamId, int associatedStreamId, int priority, int slot, List<String> nameValueBlock)
         throws IOException {
-      throw new UnsupportedOperationException("TODO");
+      if (inFinished) throw new UnsupportedOperationException();
+      headers(outFinished, streamId, priority, nameValueBlock);
     }
 
     @Override public synchronized void synReply(boolean outFinished, int streamId,
         List<String> nameValueBlock) throws IOException {
-      throw new UnsupportedOperationException("TODO");
+      headers(outFinished, streamId, -1, nameValueBlock);
     }
 
     @Override public synchronized void headers(int streamId, List<String> nameValueBlock)
         throws IOException {
-      throw new UnsupportedOperationException("TODO");
+      headers(false, streamId, -1, nameValueBlock);
+    }
+
+    private void headers(boolean outFinished, int streamId, int priority,
+        List<String> nameValueBlock) throws IOException {
+      hpackBuffer.reset();
+      hpackWriter.writeHeaders(nameValueBlock);
+      int type = TYPE_HEADERS;
+      int length = hpackBuffer.size();
+      int flags = FLAG_END_HEADERS;
+      if (outFinished) flags |= FLAG_END_STREAM;
+      if (priority != -1) flags |= FLAG_PRIORITY;
+      out.writeInt((length & 0xffff) << 16 | (type & 0xff) << 8 | (flags & 0xff));
+      out.writeInt(streamId & 0x7fffffff);
+      if (priority != -1) out.writeInt(priority & 0x7fffffff);
+      hpackBuffer.writeTo(out);
     }
 
     @Override public synchronized void rstStream(int streamId, ErrorCode errorCode)
@@ -238,30 +323,45 @@ final class Http20Draft04 implements Variant {
 
     @Override public synchronized void data(boolean outFinished, int streamId, byte[] data,
         int offset, int byteCount) throws IOException {
-      throw new UnsupportedOperationException("TODO");
+      int type = TYPE_DATA;
+      int flags = 0;
+      if (outFinished) flags |= FLAG_END_STREAM;
+      out.writeInt((byteCount & 0xffff) << 16 | (type & 0xff) << 8 | (flags & 0xff));
+      out.writeInt(streamId & 0x7fffffff);
+      out.write(data, offset, byteCount);
     }
 
     @Override public synchronized void settings(Settings settings) throws IOException {
-      throw new UnsupportedOperationException("TODO");
+      int type = TYPE_SETTINGS;
+      int length = settings.size() * 8;
+      int flags = 0;
+      int streamId = 0;
+      out.writeInt((length & 0xffff) << 16 | (type & 0xff) << 8 | (flags & 0xff));
+      out.writeInt(streamId & 0x7fffffff);
+      for (int i = 0; i < Settings.COUNT; i++) {
+        if (!settings.isSet(i)) continue;
+        out.writeInt(i & 0xffffff);
+        out.writeInt(settings.get(i));
+      }
     }
 
     @Override public synchronized void noop() throws IOException {
-      throw new UnsupportedOperationException("TODO");
+      throw new UnsupportedOperationException();
     }
 
     @Override public synchronized void ping(boolean reply, int payload1, int payload2)
         throws IOException {
-      throw new UnsupportedOperationException("TODO");
+      // TODO
     }
 
     @Override public synchronized void goAway(int lastGoodStreamId, ErrorCode errorCode)
         throws IOException {
-      throw new UnsupportedOperationException("TODO");
+      // TODO
     }
 
     @Override public synchronized void windowUpdate(int streamId, int deltaWindowSize)
         throws IOException {
-      throw new UnsupportedOperationException("TODO");
+      // TODO
     }
 
     @Override public void close() throws IOException {

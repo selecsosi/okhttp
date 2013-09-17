@@ -113,6 +113,9 @@ final class Spdy3 implements Variant {
       this.client = client;
     }
 
+    @Override public void readConnectionHeader() {
+    }
+
     /**
      * Send the next frame to {@code handler}. Returns true unless there are no
      * more frames on the stream.
@@ -203,8 +206,8 @@ final class Spdy3 implements Variant {
 
       boolean inFinished = (flags & FLAG_FIN) != 0;
       boolean outFinished = (flags & FLAG_UNIDIRECTIONAL) != 0;
-      handler.synStream(outFinished, inFinished, streamId, associatedStreamId, priority, slot,
-          nameValueBlock);
+      handler.headers(outFinished, inFinished, streamId, associatedStreamId, priority,
+          nameValueBlock, HeadersMode.SPDY_SYN_STREAM);
     }
 
     private void readSynReply(Handler handler, int flags, int length) throws IOException {
@@ -212,7 +215,7 @@ final class Spdy3 implements Variant {
       int streamId = w1 & 0x7fffffff;
       List<String> nameValueBlock = readNameValueBlock(length - 4);
       boolean inFinished = (flags & FLAG_FIN) != 0;
-      handler.synReply(inFinished, streamId, nameValueBlock);
+      handler.headers(false, inFinished, streamId, -1, -1, nameValueBlock, HeadersMode.SPDY_REPLY);
     }
 
     private void readRstStream(Handler handler, int flags, int length) throws IOException {
@@ -230,7 +233,7 @@ final class Spdy3 implements Variant {
       int w1 = in.readInt();
       int streamId = w1 & 0x7fffffff;
       List<String> nameValueBlock = readNameValueBlock(length - 4);
-      handler.headers(streamId, nameValueBlock);
+      handler.headers(false, false, streamId, -1, -1, nameValueBlock, HeadersMode.SPDY_HEADERS);
     }
 
     private void readWindowUpdate(Handler handler, int flags, int length) throws IOException {
@@ -281,9 +284,13 @@ final class Spdy3 implements Variant {
       this.compressedLimit += length;
       try {
         int numberOfPairs = nameValueBlockIn.readInt();
-        if ((numberOfPairs * 2) < 0) {
+        if (numberOfPairs < 0) {
           Logger.getLogger(getClass().getName()).warning("numberOfPairs < 0: " + numberOfPairs);
           throw ioException("numberOfPairs < 0");
+        }
+        if (numberOfPairs > 1024) {
+          Logger.getLogger(getClass().getName()).warning("numberOfPairs > 1024: " + numberOfPairs);
+          throw ioException("numberOfPairs > 1024");
         }
         List<String> entries = new ArrayList<String>(numberOfPairs * 2);
         for (int i = 0; i < numberOfPairs; i++) {
