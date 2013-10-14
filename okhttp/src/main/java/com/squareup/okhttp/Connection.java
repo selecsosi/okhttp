@@ -159,7 +159,7 @@ public final class Connection implements Closeable {
       platform.setNpnProtocols(sslSocket, NPN_PROTOCOLS);
     }
 
-    sslSocket.setEnabledCipherSuites(ENABLED_CIPHERS);
+//    sslSocket.setEnabledCipherSuites(ENABLED_CIPHERS);
     
     // Force handshake. This can throw!
     sslSocket.startHandshake();
